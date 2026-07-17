@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wg-status ./cmd/wg
 # the binary under systemd on the host: it talks to WireGuard over netlink, so
 # it needs the host network namespace and CAP_NET_ADMIN. This image is aimed at
 # local/demo use with the fake collector, where no privileges are required.
-FROM alpine:3.22
+FROM alpine:3.24
 RUN adduser -D -u 10001 app
 COPY --from=build /out/wg-status /usr/local/bin/wg-status
 USER app
