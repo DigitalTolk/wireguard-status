@@ -12,6 +12,10 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      code-quality: write # upload coverage to GitHub Code Quality
+      pull-requests: read # let push builds resolve the PR to comment on
     steps:
       - uses: actions/checkout@v7
 
@@ -34,16 +38,23 @@ jobs:
 
       # Coverage is measured over ./internal/... (all the real logic);
       # cmd/wg-status is a thin main() shim that only wires signals to
-      # internal/app.Run and is deliberately excluded from the 100% gate.
+      # internal/app.Run and is deliberately excluded.
       - name: Test
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./internal/...
 
-      # Enforce the 100% coverage gate and publish the breakdown straight to
-      # the GitHub Actions job summary (and as a PR check).
-      - name: Check and publish coverage
-        uses: vladopajic/go-test-coverage@v2
+      # GitHub Code Quality ingests Cobertura XML, so convert Go's profile.
+      - name: Convert coverage to Cobertura XML
+        run: go run github.com/boumenot/gocover-cobertura@latest < coverage.out > coverage.xml
+
+      # Upload to GitHub's native code coverage; results appear in the UI and
+      # as a github-code-quality[bot] PR comment vs the default branch.
+      # Requires "Code Quality" to be enabled in the repository settings.
+      - name: Upload coverage to GitHub Code Quality
+        uses: actions/upload-code-coverage@v1
         with:
-          config: ./.testcoverage.yml
+          file: coverage.xml
+          language: Go
+          label: code-coverage/go
 
   lint:
     name: Lint
