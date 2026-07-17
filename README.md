@@ -95,8 +95,11 @@ collector wants `CAP_NET_ADMIN` and the host network namespace), so the cleanest
 deploy is a **static binary under systemd**, not a container:
 
 ```bash
-go build -o wg-status ./cmd/wg-status
+# Grab the latest prebuilt static binary (arm64: swap amd64 → arm64).
+# Or build it yourself:  go build -o wg-status ./cmd/wg-status
+curl -fsSL -o wg-status https://github.com/DigitalTolk/wireguard-status/releases/latest/download/wg-status_linux_amd64
 install -m0755 wg-status /usr/local/bin/wg-status
+wg-status version   # check what you got
 mkdir -p /etc/wg-status && install -m0640 wg-status.example.conf /etc/wg-status/wg-status.conf   # then edit
 install -m0644 deploy/wg-status.service /etc/systemd/system/wg-status.service
 systemctl daemon-reload && systemctl enable --now wg-status

@@ -30,14 +30,14 @@ builds:
       - -X github.com/DigitalTolk/wireguard-status/internal/app.date={{ .CommitDate }}
 
 archives:
+  # Publish the raw binaries (no tarball) so a release asset is the executable
+  # itself — download, chmod +x, run. No unzip, no README/LICENSE to remove.
+  # The name is version-less so the stable GitHub URL always fetches the latest:
+  #   .../releases/latest/download/wg-status_linux_amd64
+  # (the binary reports its own version via `wg-status version`).
   - id: wg-status
-    formats: [tar.gz]
-    name_template: >-
-      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-    files:
-      - README.md
-      - LICENSE
-      - wg-status.example.conf
+    formats: [binary]
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}'
 
 checksum:
   name_template: checksums.txt
