@@ -2,8 +2,6 @@ package wg
 
 import (
 	"fmt"
-	"os/exec"
-	"strings"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -78,25 +76,4 @@ func convertPeer(iface string, p wgtypes.Peer) Peer {
 		out.AllowedIPs = append(out.AllowedIPs, ipnet.String())
 	}
 	return out
-}
-
-// CmdRestarter restarts an interface by running a configured command, with
-// "{iface}" substituted for the interface name.
-type CmdRestarter struct {
-	Command []string
-}
-
-func (r CmdRestarter) Restart(iface string) error {
-	if len(r.Command) == 0 {
-		return fmt.Errorf("no restart command configured")
-	}
-	args := make([]string, len(r.Command))
-	for i, a := range r.Command {
-		args[i] = strings.ReplaceAll(a, "{iface}", iface)
-	}
-	cmd := exec.Command(args[0], args[1:]...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }

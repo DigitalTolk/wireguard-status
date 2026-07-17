@@ -1,5 +1,6 @@
-// Package status turns raw WireGuard data into an evaluated report, tracks how
-// long each interface has been degraded, and drives automatic restarts.
+// Package status turns raw WireGuard data into an evaluated report and tracks
+// how long each interface has been degraded. It is read-only: restarting links
+// is left to an external watchdog driven by the health endpoints.
 package status
 
 import (
@@ -21,35 +22,22 @@ const (
 // PeerReport is an evaluated peer.
 type PeerReport struct {
 	wg.Peer
-	Name         string
 	State        string
 	HandshakeAge time.Duration // since last handshake; 0 when never
 }
 
 func (p PeerReport) Healthy() bool { return p.State == StateUp }
 
-// shortKey is a compact display label for a peer's public key.
-func shortKey(k string) string {
-	if len(k) <= 11 {
-		return k
-	}
-	return k[:8] + "…"
-}
-
 // InterfaceReport is an evaluated interface.
 type InterfaceReport struct {
-	Name        string
-	PublicKey   string
-	ListenPort  int
-	Peers       []PeerReport
-	AutoRestart bool
+	Name       string
+	PublicKey  string
+	ListenPort int
+	Peers      []PeerReport
 
-	// Degraded is true when any peer is down/never.
-	Degraded        bool
-	DownSince       time.Time // zero when not currently degraded
-	LastRestart     time.Time
-	LastRestartErr  string
-	RestartAttempts int
+	// Degraded is true when any peer is down/never. Drives alerting (health 503).
+	Degraded  bool
+	DownSince time.Time // zero unless the interface is currently degraded
 }
 
 // DownFor returns how long the interface has been degraded, or 0.
@@ -68,31 +56,21 @@ type Report struct {
 	Err         string
 }
 
-// ifaceRuntime is the persisted-in-memory restart bookkeeping per interface.
-type ifaceRuntime struct {
-	downSince       time.Time
-	lastRestart     time.Time
-	lastRestartErr  string
-	restartAttempts int
-}
-
-// Monitor collects, evaluates, caches the latest report, and runs auto-restart.
+// Monitor collects, evaluates and caches the latest report.
 type Monitor struct {
 	cfg  *config.Config
 	coll wg.Collector
-	rst  wg.Restarter
 
-	mu      sync.Mutex
-	runtime map[string]*ifaceRuntime
-	latest  *Report
+	mu        sync.Mutex
+	downSince map[string]time.Time // iface -> when it became degraded
+	latest    *Report
 }
 
-func NewMonitor(cfg *config.Config, coll wg.Collector, rst wg.Restarter) *Monitor {
+func NewMonitor(cfg *config.Config, coll wg.Collector) *Monitor {
 	return &Monitor{
-		cfg:     cfg,
-		coll:    coll,
-		rst:     rst,
-		runtime: map[string]*ifaceRuntime{},
+		cfg:       cfg,
+		coll:      coll,
+		downSince: map[string]time.Time{},
 	}
 }
 
@@ -108,7 +86,7 @@ func (m *Monitor) Latest() *Report {
 	return m.tick()
 }
 
-// Run drives the monitor until ctx is done. It performs an initial tick
+// Run drives the monitor until stop is closed. It performs an initial tick
 // immediately, then every poll interval.
 func (m *Monitor) Run(stop <-chan struct{}) {
 	m.tick()
@@ -124,38 +102,8 @@ func (m *Monitor) Run(stop <-chan struct{}) {
 	}
 }
 
-// Restart triggers a manual restart of an interface and records the outcome.
-func (m *Monitor) Restart(iface string) error {
-	err := m.rst.Restart(iface)
-	m.mu.Lock()
-	rt := m.runtimeFor(iface)
-	rt.lastRestart = time.Now()
-	rt.restartAttempts++
-	if err != nil {
-		rt.lastRestartErr = err.Error()
-	} else {
-		rt.lastRestartErr = ""
-	}
-	m.mu.Unlock()
-	if err != nil {
-		log.Printf("manual restart of %s failed: %v", iface, err)
-	} else {
-		log.Printf("manual restart of %s ok", iface)
-	}
-	return err
-}
-
-func (m *Monitor) runtimeFor(iface string) *ifaceRuntime {
-	rt := m.runtime[iface]
-	if rt == nil {
-		rt = &ifaceRuntime{}
-		m.runtime[iface] = rt
-	}
-	return rt
-}
-
-// tick collects, evaluates, updates runtime state, applies auto-restart, caches
-// and returns the report.
+// tick collects, evaluates, updates down-since tracking, caches and returns the
+// report.
 func (m *Monitor) tick() *Report {
 	now := time.Now()
 	ifaces, err := m.coll.Collect()
@@ -178,13 +126,12 @@ func (m *Monitor) tick() *Report {
 
 	for _, iface := range ifaces {
 		ir := InterfaceReport{
-			Name:        iface.Name,
-			PublicKey:   iface.PublicKey,
-			ListenPort:  iface.ListenPort,
-			AutoRestart: m.cfg.AutoRestart.Enabled,
+			Name:       iface.Name,
+			PublicKey:  iface.PublicKey,
+			ListenPort: iface.ListenPort,
 		}
 		for _, p := range iface.Peers {
-			pr := PeerReport{Peer: p, Name: shortKey(p.PublicKey)}
+			pr := PeerReport{Peer: p}
 			switch {
 			case p.LastHandshake.IsZero():
 				pr.State = StateNever
@@ -203,26 +150,14 @@ func (m *Monitor) tick() *Report {
 			ir.Peers = append(ir.Peers, pr)
 		}
 
-		rt := m.runtimeFor(iface.Name)
 		if ir.Degraded {
-			if rt.downSince.IsZero() {
-				rt.downSince = now
+			if m.downSince[iface.Name].IsZero() {
+				m.downSince[iface.Name] = now
 			}
 		} else {
-			rt.downSince = time.Time{}
-			rt.restartAttempts = 0
-			rt.lastRestartErr = ""
+			delete(m.downSince, iface.Name)
 		}
-
-		// Auto-restart decision.
-		if ir.Degraded && ir.AutoRestart {
-			m.maybeAutoRestart(iface.Name, rt, now)
-		}
-
-		ir.DownSince = rt.downSince
-		ir.LastRestart = rt.lastRestart
-		ir.LastRestartErr = rt.lastRestartErr
-		ir.RestartAttempts = rt.restartAttempts
+		ir.DownSince = m.downSince[iface.Name]
 
 		if ir.Degraded {
 			rep.Degraded = true
@@ -232,30 +167,4 @@ func (m *Monitor) tick() *Report {
 
 	m.latest = rep
 	return rep
-}
-
-// maybeAutoRestart attempts a restart if the interface has been down long
-// enough, the cooldown has elapsed, and we are under the attempt cap. Caller
-// holds m.mu.
-func (m *Monitor) maybeAutoRestart(iface string, rt *ifaceRuntime, now time.Time) {
-	ar := m.cfg.AutoRestart
-	if now.Sub(rt.downSince) < ar.DownFor.D() {
-		return
-	}
-	if !rt.lastRestart.IsZero() && now.Sub(rt.lastRestart) < ar.Cooldown.D() {
-		return
-	}
-	if rt.restartAttempts >= ar.MaxAttempts {
-		return
-	}
-	rt.lastRestart = now
-	rt.restartAttempts++
-	// Restart synchronously; commands are quick and this keeps state coherent.
-	if err := m.rst.Restart(iface); err != nil {
-		rt.lastRestartErr = err.Error()
-		log.Printf("auto-restart of %s failed (attempt %d/%d): %v", iface, rt.restartAttempts, ar.MaxAttempts, err)
-	} else {
-		rt.lastRestartErr = ""
-		log.Printf("auto-restart of %s ok (attempt %d/%d)", iface, rt.restartAttempts, ar.MaxAttempts)
-	}
 }

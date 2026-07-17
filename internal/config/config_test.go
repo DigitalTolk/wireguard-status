@@ -23,15 +23,6 @@ Password = hunter2
 
 [Monitor]
 HandshakeStale = 90s
-
-[AutoRestart]
-Enabled     = yes
-DownFor     = 30s
-Cooldown    = 1m
-MaxAttempts = 5
-
-[Restart]
-Command = systemctl restart wg-quick@{iface}
 `
 	c := Defaults()
 	if err := c.parseINI([]byte(ini)); err != nil {
@@ -47,14 +38,6 @@ Command = systemctl restart wg-quick@{iface}
 	if c.Thresholds.HandshakeStale.D() != 90*time.Second {
 		t.Errorf("HandshakeStale wrong: %s", c.Thresholds.HandshakeStale.D())
 	}
-	if !c.AutoRestart.Enabled || c.AutoRestart.DownFor.D() != 30*time.Second ||
-		c.AutoRestart.Cooldown.D() != time.Minute || c.AutoRestart.MaxAttempts != 5 {
-		t.Errorf("[AutoRestart] wrong: %+v", c.AutoRestart)
-	}
-	wantCmd := []string{"systemctl", "restart", "wg-quick@{iface}"}
-	if len(c.Restart.Command) != len(wantCmd) {
-		t.Fatalf("Command wrong: %v", c.Restart.Command)
-	}
 }
 
 func TestParseINIErrors(t *testing.T) {
@@ -62,7 +45,6 @@ func TestParseINIErrors(t *testing.T) {
 		"unknown section": "[Bogus]\nKey = v\n",
 		"unknown key":     "[Server]\nNope = v\n",
 		"key before sect": "Listen = :80\n",
-		"bad bool":        "[AutoRestart]\nEnabled = maybe\n",
 		"bad duration":    "[Monitor]\nHandshakeStale = soon\n",
 		"peer rejected":   "[Peer]\nPublicKey = x\n",
 		"iface rejected":  "[Interface]\nName = wg0\n",

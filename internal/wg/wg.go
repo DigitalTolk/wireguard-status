@@ -28,8 +28,3 @@ type Peer struct {
 type Collector interface {
 	Collect() ([]Interface, error)
 }
-
-// Restarter brings a (failing) interface back up.
-type Restarter interface {
-	Restart(iface string) error
-}

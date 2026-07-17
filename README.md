@@ -1,10 +1,12 @@
 # wireguard-status
 
-A tiny, dependency-free Go service that renders a **server-side status page** for
-your WireGuard interfaces and peers, and returns **HTTP 503 while any monitored
-peer is down** so [Uptime-Kuma](https://github.com/louislam/uptime-kuma) (or any
-HTTP check) can alert you. It can also **restart a failing link** — manually from
-the page, or automatically once a link has been down long enough.
+A tiny, dependency-free Go service that serves a **status dashboard** for your
+WireGuard interfaces and peers plus a **`/status` JSON endpoint** that returns
+**HTTP 503 while any monitored peer is down**, so
+[Uptime-Kuma](https://github.com/louislam/uptime-kuma) (or any HTTP check) can
+alert you. It is **read-only** — it never touches your links; restarting is left
+to an external watchdog driven by the per-interface `/status/{iface}` endpoint
+(so wg-status needs no root/`wg-quick` privileges).
 
 Built for the `nat-instance` pattern: a host that is simultaneously a NAT exit,
 a WireGuard server for site VPNs (`wg0`, `wg2`, …), and part of a VPC mesh
@@ -12,20 +14,34 @@ a WireGuard server for site VPNs (`wg0`, `wg2`, …), and part of a VPC mesh
 
 ## What it shows
 
-For every interface and peer: public key, listen port, endpoint, allowed IPs,
-**link state** (up / down / never), **rx/tx counters**, **last handshake**, and
-persistent-keepalive. A peer is **down** when its last handshake is older than
-`thresholds.handshake_stale` (default 180s).
+For every interface and peer: full public key, listen port, endpoint, allowed
+IPs, **link state** (up / down / never), **rx/tx counters**, **last handshake**,
+and persistent-keepalive. A peer is **down** when its last handshake is older
+than `thresholds.handshake_stale` (default 180s). Hovering an endpoint shows its
+**reverse-DNS** name (resolved in the background and cached in memory for a day).
+The page is a small client that renders from `GET /status` and re-polls it every
+few seconds — no full reloads.
 
 ## Endpoints
 
 | Route | Purpose |
 |---|---|
-| `GET /` | SSR status page. Returns **503** (still rendering the page) when any monitored peer is down. Append `?strict=0` to always get 200 for browsing. |
-| `GET /healthz` | JSON summary; 503 while degraded. Point Uptime-Kuma here if you'd rather not parse HTML. |
-| `POST /restart/{iface}` | Restart an interface (the page's button posts here). |
+| `GET /` | Dashboard shell (HTML+JS). Always **200** — it renders itself from `/status`. |
+| `GET /status` | **Complete JSON** of every interface and peer, with overall `peers_total` / `peers_down`. **503** while any peer is down (or collection failed); append `?strict=0` for 200. This is the health endpoint. |
+| `GET /status/{iface}` | Same JSON for **one** interface (404 if unknown); **503** while that interface is degraded. Point a per-link watchdog here to restart interfaces individually. |
+| `GET /robots.txt` | Disallows all crawlers. Public, no auth. |
+| `GET /favicon.svg` | Site icon. Public, no auth. |
 
-Everything is behind **HTTP basic auth**. The password is stored as a salted
+Any other path returns **404**.
+
+**Monitoring:** point an [Uptime-Kuma](https://github.com/louislam/uptime-kuma)
+HTTP monitor (with the basic-auth credentials) at `GET /status` — it returns
+**503 while any peer is down**, which fires the alert. To restart links, run a
+watchdog that polls `GET /status/{iface}` per interface and runs
+`wg-quick`/`systemctl` itself when it sees a 503 — wg-status stays privilege-free.
+
+The status routes are behind **HTTP basic auth** (`robots.txt` and the favicon
+are public). The password is stored as a salted
 **PBKDF2-HMAC-SHA256 hash**, never plaintext — generate one with:
 
 ```bash
@@ -39,8 +55,7 @@ printf '%s' 'your-password' | wg-status -hash-password
 
 You do **not** list peers or interfaces. Every interface and peer that WireGuard
 reports is discovered automatically and monitored — any stale peer flips the page
-to 503. There is no per-peer or per-interface config; auto-restart is a single
-global setting (`[AutoRestart] Enabled`).
+to 503. There is no per-peer or per-interface config.
 
 ## Run it locally (full demo, no WireGuard needed)
 
@@ -49,27 +64,28 @@ docker compose up --build
 # open http://localhost:8600   (admin / secret)
 ```
 
-The demo uses the **fake collector**: four interfaces with one mesh peer that
-flaps. With the short demo thresholds you'll watch it go **up → stale (503) →
-auto-restart → up** roughly once a minute. Watch the status code:
+The demo uses the **fake collector**: four interfaces with live counters, and one
+mesh peer whose handshake is frozen so it ages out and shows the interface as
+**down (503)**. The demo endpoints use real public IPs so the endpoint
+reverse-DNS hover works locally. Watch the status code:
 
 ```bash
-watch -n2 'curl -s -o /dev/null -w "%{http_code}\n" -u admin:secret localhost:8600/healthz'
+watch -n2 'curl -s -o /dev/null -w "%{http_code}\n" -u admin:secret localhost:8600/status'
 ```
 
 Or without Docker:
 
 ```bash
 WG_COLLECTOR=fake WG_LISTEN=:8600 WG_AUTH_USER=admin WG_AUTH_PASS=secret \
-  WG_HANDSHAKE_STALE=45s WG_POLL_INTERVAL=2s WG_AUTORESTART_DOWNFOR=20s \
+  WG_HANDSHAKE_STALE=45s WG_POLL_INTERVAL=2s \
   go run ./cmd/wg-status
 ```
 
 ## Run it in production (nat-instance)
 
-Reading `wg show all dump` and running `wg-quick`/`systemctl` need host network
-access and privileges, so the cleanest deploy is a **static binary under
-systemd**, not a container:
+Reading WireGuard state over netlink needs host network access (the `wg`
+collector wants `CAP_NET_ADMIN` and the host network namespace), so the cleanest
+deploy is a **static binary under systemd**, not a container:
 
 ```bash
 go build -o wg-status ./cmd/wg-status
@@ -79,33 +95,46 @@ install -m0644 deploy/wg-status.service /etc/systemd/system/wg-status.service
 systemctl daemon-reload && systemctl enable --now wg-status
 ```
 
-Then add an Uptime-Kuma HTTP monitor for `http://<nat-instance>:8080/` with
-basic-auth creds; it alerts on the 503.
+Then add an Uptime-Kuma HTTP monitor for `http://<nat-instance>:8080/status`
+with basic-auth creds; it alerts on the 503.
 
 ## Configuration
 
 WireGuard-style **INI** file — `[Sections]` with `Key = Value` lines, the same
 look and feel as `wgX.conf` (path via `-config` or `WG_CONFIG`, default
 `wg-status.conf`; a missing file is fine — defaults + env are used). See
-[`wg-status.example.conf`](wg-status.example.conf). Per-interface overrides go in
-repeated `[Interface]` blocks (with a `Name =`), and per-peer metadata in
-repeated `[Peer]` blocks (with a `PublicKey =`), just like a WireGuard config.
+[`wg-status.example.conf`](wg-status.example.conf). The recognised sections are
+`[Server]`, `[Auth]` and `[Monitor]`; interfaces and peers are auto-detected, not
+configured.
 
 Env overrides for the common knobs: `WG_LISTEN`, `WG_COLLECTOR` (`wg`|`fake`),
 `WG_AUTH_USER`, `WG_AUTH_PASS_HASH` (preferred), `WG_HANDSHAKE_STALE`,
-`WG_POLL_INTERVAL`, `WG_AUTORESTART`, `WG_AUTORESTART_DOWNFOR`.
+`WG_POLL_INTERVAL`, `WG_TLS_CERT`, `WG_TLS_KEY`.
+
+### TLS (HTTPS)
+
+Set both `TLSCert` and `TLSKey` under `[Server]` (or `WG_TLS_CERT` / `WG_TLS_KEY`)
+to PEM file paths and the server listens with HTTPS; leave both empty for plain
+HTTP. Setting only one is a config error.
+
+```ini
+[Server]
+Listen  = :8443
+TLSCert = /etc/wg-status/tls/cert.pem
+TLSKey  = /etc/wg-status/tls/key.pem
+```
 
 For local/dev convenience you may instead supply a plaintext password via
 `[Auth] Password` or `WG_AUTH_PASS` — it is hashed in memory at startup (with a
 warning). The docker-compose demo uses this. For production, set `PasswordHash`.
 
-### Auto-restart safety
+## Restarting links
 
-A link must be **continuously degraded for `down_for`** before a restart is
-attempted; restarts are then rate-limited by `cooldown` and capped at
-`max_attempts` per outage (the counter resets when the link recovers). This
-prevents restart loops on a genuinely-broken link. Set `[AutoRestart] Enabled`
-to `false` to keep restarts manual-only.
+wg-status never restarts anything itself. Run a small watchdog that polls
+`GET /status/{iface}` for each interface and, on a 503, restarts that link with
+whatever it has privileges for (e.g. `systemctl restart wg-quick@wg0`). Keeping
+restarts out of wg-status means it needs no root and can't bounce a link on its
+own.
 
 ## Layout
 
@@ -113,8 +142,8 @@ to `false` to keep restarts manual-only.
 cmd/wg-status/      entrypoint + wiring + `-hash-password`
 internal/auth/      PBKDF2 password hashing & verification
 internal/config/    INI config (WireGuard-style) + env overrides
-internal/wg/        data model, `wg show all dump` parser, fake demo collector
-internal/status/    state evaluation, down-since tracking, auto-restart loop
-internal/web/       basic auth, SSR handlers, embedded template + CSS
+internal/wg/        data model, wgctrl (netlink) collector, fake demo collector
+internal/status/    state evaluation + down-since tracking (read-only)
+internal/web/       basic auth, JSON status API + static dashboard shell
 deploy/             systemd unit
 ```

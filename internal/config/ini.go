@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -73,10 +72,6 @@ func (c *Config) parseINI(b []byte) error {
 			err = c.applyAuth(s)
 		case "monitor":
 			err = c.applyMonitor(s)
-		case "autorestart":
-			err = c.applyAutoRestart(s)
-		case "restart":
-			err = c.applyRestart(s)
 		default:
 			err = fmt.Errorf("unknown section [%s]", s.name)
 		}
@@ -94,6 +89,10 @@ func (c *Config) applyServer(s section) error {
 			c.Listen = v
 		case "collector":
 			c.Collector = v
+		case "tlscert":
+			c.TLSCert = v
+		case "tlskey":
+			c.TLSKey = v
 		case "pollinterval":
 			d, err := time.ParseDuration(v)
 			if err != nil {
@@ -137,63 +136,4 @@ func (c *Config) applyMonitor(s section) error {
 		}
 	}
 	return nil
-}
-
-func (c *Config) applyAutoRestart(s section) error {
-	for k, v := range s.keys {
-		switch k {
-		case "enabled":
-			b, err := parseBool(v)
-			if err != nil {
-				return fmt.Errorf("Enabled: %w", err)
-			}
-			c.AutoRestart.Enabled = b
-		case "downfor":
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return fmt.Errorf("DownFor: %w", err)
-			}
-			c.AutoRestart.DownFor = Duration(d)
-		case "cooldown":
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return fmt.Errorf("Cooldown: %w", err)
-			}
-			c.AutoRestart.Cooldown = Duration(d)
-		case "maxattempts":
-			n, err := strconv.Atoi(v)
-			if err != nil {
-				return fmt.Errorf("MaxAttempts: %w", err)
-			}
-			c.AutoRestart.MaxAttempts = n
-		default:
-			return fmt.Errorf("unknown key %q", k)
-		}
-	}
-	return nil
-}
-
-func (c *Config) applyRestart(s section) error {
-	for k, v := range s.keys {
-		switch k {
-		case "command":
-			c.Restart.Command = strings.Fields(v)
-		default:
-			return fmt.Errorf("unknown key %q", k)
-		}
-	}
-	return nil
-}
-
-// parseBool accepts the usual truthy/falsey spellings (true/false, yes/no,
-// on/off, 1/0) case-insensitively.
-func parseBool(s string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "true", "yes", "on", "1":
-		return true, nil
-	case "false", "no", "off", "0":
-		return false, nil
-	default:
-		return false, fmt.Errorf("invalid boolean %q", s)
-	}
 }

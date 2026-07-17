@@ -1,5 +1,5 @@
-# Local end-to-end demo: fake collector, short thresholds so you can watch a
-# mesh peer flap (up -> stale -> 503 -> auto-restart -> up) within ~1 minute.
+# Local end-to-end demo: fake collector with short thresholds so a mesh peer
+# ages out to stale (503) within ~1 minute.
 #
 #   docker compose up --build
 #   open http://localhost:8600            (admin / secret)
@@ -15,5 +15,4 @@ services:
       WG_AUTH_PASS: secret
       WG_HANDSHAKE_STALE: 45s
       WG_POLL_INTERVAL: 2s
-      WG_AUTORESTART_DOWNFOR: 20s
     restart: unless-stopped

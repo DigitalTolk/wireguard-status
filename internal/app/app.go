@@ -63,21 +63,16 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	log.Printf("config: %s", cfg)
 
-	var (
-		coll wg.Collector
-		rst  wg.Restarter
-	)
+	var coll wg.Collector
 	switch cfg.Collector {
 	case "fake":
-		fc := wg.NewFakeCollector()
-		coll, rst = fc, fc
+		coll = wg.NewFakeCollector()
 		log.Printf("using FAKE collector (bogus demo data)")
 	default:
 		coll = wg.WgCollector{}
-		rst = wg.CmdRestarter{Command: cfg.Restart.Command}
 	}
 
-	mon := status.NewMonitor(cfg, coll, rst)
+	mon := status.NewMonitor(cfg, coll)
 	stop := make(chan struct{})
 	go mon.Run(stop)
 	defer close(stop)
@@ -89,10 +84,17 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	serve := httpSrv.ListenAndServe
+	scheme := "http"
+	if cfg.TLSCert != "" {
+		serve = func() error { return httpSrv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey) }
+		scheme = "https"
+	}
+
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Printf("listening on %s", cfg.Listen)
-		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("listening on %s (%s)", cfg.Listen, scheme)
+		if err := serve(); !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
 	}()

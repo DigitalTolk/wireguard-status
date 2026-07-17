@@ -10,8 +10,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wg-status ./cmd/wg
 
 # Minimal runtime. For the "wg" collector in production you would instead run
 # the binary under systemd on the host: it talks to WireGuard over netlink, so
-# it needs the host network namespace and CAP_NET_ADMIN (the wg-quick tools are
-# only needed if you configure an auto-restart command). This image is aimed at
+# it needs the host network namespace and CAP_NET_ADMIN. This image is aimed at
 # local/demo use with the fake collector, where no privileges are required.
 FROM alpine:3.22
 RUN adduser -D -u 10001 app

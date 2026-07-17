@@ -1,7 +1,7 @@
 package web
 
 import (
-	"html/template"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,26 +18,43 @@ type peerState int
 const (
 	healthy peerState = iota
 	downState
+	mixedState // one peer up, one down (degraded but not fully down)
 )
 
-// genColl returns a single interface whose one peer is fresh or stale,
-// recomputed at each Collect so age comparisons stay correct.
+// genColl returns a single interface, recomputing peer handshakes at each
+// Collect so age comparisons stay correct.
 type genColl struct{ state peerState }
 
 func (g genColl) Collect() ([]wg.Interface, error) {
-	p := wg.Peer{Interface: "wg0", PublicKey: "PeerKeyAAAAAAAAAAAAAAAA", AllowedIPs: []string{"10.0.0.0/24"}}
+	mk := func(key, endpoint string, up bool) wg.Peer {
+		p := wg.Peer{Interface: "wg0", PublicKey: key, Endpoint: endpoint, AllowedIPs: []string{"10.0.0.0/24"}, PersistentKeepalive: 25}
+		if up {
+			p.LastHandshake = time.Now()
+		} else {
+			p.LastHandshake = time.Now().Add(-time.Hour)
+		}
+		return p
+	}
+	var peers []wg.Peer
 	switch g.state {
 	case healthy:
-		p.LastHandshake = time.Now()
+		peers = []wg.Peer{mk("up1", "203.0.113.7:51820", true)}
 	case downState:
-		p.LastHandshake = time.Now().Add(-time.Hour)
+		peers = []wg.Peer{mk("down1", "203.0.113.8:51820", false)}
+	case mixedState:
+		peers = []wg.Peer{mk("up1", "203.0.113.7:51820", true), mk("down1", "203.0.113.8:51820", false)}
 	}
-	return []wg.Interface{{Name: "wg0", ListenPort: 51820, Peers: []wg.Peer{p}}}, nil
+	return []wg.Interface{{
+		Name:       "wg0",
+		PublicKey:  "IfacePubKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0=",
+		ListenPort: 51820,
+		Peers:      peers,
+	}}, nil
 }
 
-type stubRst struct{ err error }
+type errColl struct{}
 
-func (s stubRst) Restart(string) error { return s.err }
+func (errColl) Collect() ([]wg.Interface, error) { return nil, errors.New("collect boom") }
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
@@ -53,110 +70,155 @@ func testConfig(t *testing.T) *config.Config {
 	return c
 }
 
-func serverWith(t *testing.T, state peerState) (*Server, *status.Monitor) {
+func serverWith(t *testing.T, coll wg.Collector) (*Server, *status.Monitor) {
 	t.Helper()
 	cfg := testConfig(t)
-	mon := status.NewMonitor(cfg, genColl{state}, stubRst{})
-	return NewServer(cfg, mon), mon
+	mon := status.NewMonitor(cfg, coll)
+	srv := NewServer(cfg, mon)
+	// Keep tests hermetic: never touch the real resolver.
+	srv.dns.lookup = func(string) ([]string, error) { return nil, nil }
+	return srv, mon
+}
+
+func get(t *testing.T, srv *Server, method, path string, authed bool) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if authed {
+		req.SetBasicAuth("admin", "pw")
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
 }
 
 func TestBasicAuth(t *testing.T) {
-	srv, _ := serverWith(t, healthy)
+	srv, _ := serverWith(t, genColl{healthy})
 	h := srv.Handler() // one instance so the success cache persists across requests
 
 	do := func(setup func(*http.Request)) int {
-		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
 		setup(req)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
 	}
 
-	// No Authorization header -> denied.
 	if code := do(func(*http.Request) {}); code != http.StatusUnauthorized {
 		t.Errorf("no-auth: got %d, want 401", code)
 	}
-	// Valid credentials -> allowed, populates the success cache.
 	if code := do(func(r *http.Request) { r.SetBasicAuth("admin", "pw") }); code != http.StatusOK {
 		t.Errorf("valid: got %d, want 200", code)
 	}
-	// Same header again -> served from the cache.
 	if code := do(func(r *http.Request) { r.SetBasicAuth("admin", "pw") }); code != http.StatusOK {
 		t.Errorf("cached: got %d, want 200", code)
 	}
-	// Different header, wrong user -> cache miss then denied.
 	if code := do(func(r *http.Request) { r.SetBasicAuth("nobody", "pw") }); code != http.StatusUnauthorized {
 		t.Errorf("wrong-user: got %d, want 401", code)
 	}
-	// Correct user, wrong password -> denied.
 	if code := do(func(r *http.Request) { r.SetBasicAuth("admin", "nope") }); code != http.StatusUnauthorized {
 		t.Errorf("wrong-pass: got %d, want 401", code)
 	}
-	// Malformed Authorization header -> denied.
 	if code := do(func(r *http.Request) { r.Header.Set("Authorization", "Basic %%%not-base64") }); code != http.StatusUnauthorized {
 		t.Errorf("malformed: got %d, want 401", code)
 	}
 }
 
-func TestHandleIndex(t *testing.T) {
-	// Healthy -> 200.
-	srv, _ := serverWith(t, healthy)
-	rec := httptest.NewRecorder()
-	srv.handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != http.StatusOK {
-		t.Errorf("healthy index: got %d, want 200", rec.Code)
+func TestRouting(t *testing.T) {
+	srv, _ := serverWith(t, genColl{healthy})
+
+	// robots.txt is public and disallows everything.
+	if rec := get(t, srv, http.MethodGet, "/robots.txt", false); rec.Code != http.StatusOK ||
+		!contains(rec.Body.String(), "Disallow: /") {
+		t.Errorf("robots.txt: code=%d body=%q", rec.Code, rec.Body.String())
 	}
 
-	// Degraded -> 503.
-	dsrv, _ := serverWith(t, downState)
+	// The favicon is public SVG at both paths.
+	for _, p := range []string{"/favicon.svg", "/favicon.ico"} {
+		rec := get(t, srv, http.MethodGet, p, false)
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/svg+xml" {
+			t.Errorf("%s: code=%d ct=%q", p, rec.Code, rec.Header().Get("Content-Type"))
+		}
+	}
+
+	// The shell and status render; an unknown path 404s (all authenticated).
+	if rec := get(t, srv, http.MethodGet, "/", true); rec.Code != http.StatusOK {
+		t.Errorf("root: got %d, want 200", rec.Code)
+	}
+	if rec := get(t, srv, http.MethodGet, "/status", true); rec.Code != http.StatusOK {
+		t.Errorf("status: got %d, want 200", rec.Code)
+	}
+	if rec := get(t, srv, http.MethodGet, "/nope", true); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown path: got %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleIndexShell(t *testing.T) {
+	srv, _ := serverWith(t, genColl{healthy})
+	rec := httptest.NewRecorder()
+	srv.handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Errorf("shell: got %d, want 200", rec.Code)
+	}
+	// A static shell that renders itself from /status.
+	if !contains(body, `id="app"`) || !contains(body, "fetch('/status") {
+		t.Errorf("shell missing app/poll: %q", body)
+	}
+}
+
+func TestHandleStatus(t *testing.T) {
+	// Healthy -> 200 with totals.
+	srv, _ := serverWith(t, genColl{healthy})
+	rec := httptest.NewRecorder()
+	srv.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("healthy status: got %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !contains(body, `"degraded":false`) || !contains(body, `"peers_total":1`) {
+		t.Errorf("healthy status body: %s", body)
+	}
+
+	// Degraded (mixed) -> 503 with totals.
+	dsrv, _ := serverWith(t, genColl{mixedState})
 	rec = httptest.NewRecorder()
-	dsrv.handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	dsrv.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("degraded index: got %d, want 503", rec.Code)
+		t.Errorf("degraded status: got %d, want 503", rec.Code)
+	}
+	if body := rec.Body.String(); !contains(body, `"peers_total":2`) || !contains(body, `"peers_down":1`) {
+		t.Errorf("degraded status totals: %s", body)
 	}
 
 	// Degraded but ?strict=0 -> 200.
 	rec = httptest.NewRecorder()
-	dsrv.handleIndex(rec, httptest.NewRequest(http.MethodGet, "/?strict=0", nil))
+	dsrv.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status?strict=0", nil))
 	if rec.Code != http.StatusOK {
-		t.Errorf("strict=0 index: got %d, want 200", rec.Code)
+		t.Errorf("strict=0 status: got %d, want 200", rec.Code)
 	}
 }
 
-func TestHandleIndexTemplateError(t *testing.T) {
-	cfg := testConfig(t)
-	mon := status.NewMonitor(cfg, genColl{healthy}, stubRst{})
-	// A template that references a field pageData does not have fails at execute
-	// time, after the header is written — exercising the fallback branch.
-	s := &Server{cfg: cfg, mon: mon, tpl: template.Must(template.New("index.html").Parse("{{.Bogus}}"))}
+func TestHandleStatusCollectorError(t *testing.T) {
+	srv, _ := serverWith(t, errColl{})
 	rec := httptest.NewRecorder()
-	s.handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if body := rec.Body.String(); !contains(body, "template error") {
-		t.Errorf("expected template error comment, got %q", body)
+	srv.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("collector error: got %d, want 503", rec.Code)
+	}
+	if body := rec.Body.String(); !contains(body, `"error":"collect boom"`) || !contains(body, `"degraded":true`) {
+		t.Errorf("collector error body: %s", body)
 	}
 }
 
-func TestHandleHealthHealthy(t *testing.T) {
-	srv, _ := serverWith(t, healthy)
-	rec := httptest.NewRecorder()
-	srv.handleHealth(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if rec.Code != http.StatusOK {
-		t.Errorf("healthy health: got %d, want 200", rec.Code)
-	}
-}
-
-func TestHandleHealthDegraded(t *testing.T) {
+func TestHandleStatusDownFor(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.PollInterval = config.Duration(time.Millisecond)
-	cfg.AutoRestart.Enabled = false
-	mon := status.NewMonitor(cfg, genColl{downState}, stubRst{})
+	mon := status.NewMonitor(cfg, genColl{downState})
 
 	stop := make(chan struct{})
 	go mon.Run(stop)
 	defer close(stop)
 
-	// Wait for a second tick so the interface has a non-zero down-for, which
-	// drives the DownForSec branch.
+	// A second tick gives a non-zero down-for, exercising the DownFor branch.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		rep := mon.Latest()
@@ -170,62 +232,59 @@ func TestHandleHealthDegraded(t *testing.T) {
 	}
 
 	srv := NewServer(cfg, mon)
+	srv.dns.lookup = func(string) ([]string, error) { return nil, nil }
 	rec := httptest.NewRecorder()
-	srv.handleHealth(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	srv.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("degraded health: got %d, want 503", rec.Code)
-	}
-	if body := rec.Body.String(); !contains(body, "\"peers_down\":1") {
-		t.Errorf("degraded health body missing peers_down: %s", body)
+		t.Errorf("down status: got %d, want 503", rec.Code)
 	}
 }
 
-func TestHandleRestart(t *testing.T) {
-	// Missing interface -> 400 (call directly; the route never yields an empty
-	// path value).
-	srv, _ := serverWith(t, healthy)
+func TestHandleStatusIface(t *testing.T) {
+	srv, _ := serverWith(t, genColl{downState})
+
+	// Known, degraded interface -> 503, a single object (no "interfaces" array).
+	rec := get(t, srv, http.MethodGet, "/status/wg0", true)
+	body := rec.Body.String()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("iface status: got %d, want 503", rec.Code)
+	}
+	if !contains(body, `"name":"wg0"`) || !contains(body, `"peers":`) {
+		t.Errorf("iface status body: %s", body)
+	}
+	if contains(body, `"interfaces"`) {
+		t.Errorf("per-interface response must not wrap in interfaces: %s", body)
+	}
+
+	// ?strict=0 -> 200 even though degraded.
+	if rec := get(t, srv, http.MethodGet, "/status/wg0?strict=0", true); rec.Code != http.StatusOK {
+		t.Errorf("iface strict=0: got %d, want 200", rec.Code)
+	}
+
+	// Unknown interface -> 404.
+	if rec := get(t, srv, http.MethodGet, "/status/ghost", true); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown iface: got %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleStatusIfaceHealthy(t *testing.T) {
+	srv, _ := serverWith(t, genColl{healthy})
+	if rec := get(t, srv, http.MethodGet, "/status/wg0", true); rec.Code != http.StatusOK {
+		t.Errorf("healthy iface: got %d, want 200", rec.Code)
+	}
+}
+
+func TestStatusReverseDNS(t *testing.T) {
+	srv, _ := serverWith(t, genColl{healthy}) // healthy endpoint 203.0.113.7:51820
+	srv.dns.lookup = func(string) ([]string, error) { return []string{"gw.example.com."}, nil }
+	waitFor(t, func() bool { return srv.dns.name("203.0.113.7:51820") == "gw.example.com" })
+
 	rec := httptest.NewRecorder()
-	srv.handleRestart(rec, httptest.NewRequest(http.MethodPost, "/restart/", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("missing iface: got %d, want 400", rec.Code)
-	}
-
-	// Successful restart -> redirect.
-	rec = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/restart/wg0", nil)
-	req.SetPathValue("iface", "wg0")
-	srv.handleRestart(rec, req)
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("ok restart: got %d, want 303", rec.Code)
-	}
-
-	// Failing restart with JSON Accept -> 502 JSON.
-	cfg := testConfig(t)
-	fsrv := NewServer(cfg, status.NewMonitor(cfg, genColl{healthy}, stubRst{err: errTest}))
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/restart/wg0", nil)
-	req.SetPathValue("iface", "wg0")
-	req.Header.Set("Accept", "application/json")
-	fsrv.handleRestart(rec, req)
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("failing json restart: got %d, want 502", rec.Code)
-	}
-
-	// Failing restart without JSON Accept -> still redirects.
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/restart/wg0", nil)
-	req.SetPathValue("iface", "wg0")
-	fsrv.handleRestart(rec, req)
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("failing html restart: got %d, want 303", rec.Code)
+	srv.handleStatus(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if !contains(rec.Body.String(), `"endpoint_dns":"gw.example.com"`) {
+		t.Errorf("status should carry endpoint reverse-DNS: %s", rec.Body.String())
 	}
 }
-
-var errTest = &restartErr{}
-
-type restartErr struct{}
-
-func (*restartErr) Error() string { return "restart failed" }
 
 func contains(haystack, needle string) bool {
 	for i := 0; i+len(needle) <= len(haystack); i++ {

@@ -5,9 +5,9 @@
 #   systemctl daemon-reload && systemctl enable --now wg-status
 #
 # Notes:
-#   - Runs as root because `wg show` reads the WireGuard netlink and the restart
-#     command shells out to systemctl/wg-quick. If you lock this down further,
-#     grant CAP_NET_ADMIN and a sudoers rule for the restart command instead.
+#   - The `wg` collector reads WireGuard state over netlink, which needs
+#     CAP_NET_ADMIN and the host network namespace. wg-status is read-only and
+#     never restarts links, so it needs no other privileges.
 [Unit]
 Description=WireGuard status page
 After=network-online.target
@@ -17,8 +17,8 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/wg-status -config /etc/wg-status/wg-status.conf
 Restart=on-failure
 RestartSec=5
-# Hardening (relax if it conflicts with your restart command):
-NoNewPrivileges=false
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
 

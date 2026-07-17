@@ -31,6 +31,12 @@ type Config struct {
 	// Collector selects the data source: "wg" (real) or "fake" (demo).
 	Collector string
 
+	// TLSCert and TLSKey are paths to a PEM certificate and private key. When
+	// both are set the server listens with HTTPS; otherwise it serves plain
+	// HTTP. It is an error to set only one.
+	TLSCert string
+	TLSKey  string
+
 	Auth struct {
 		Username string
 		// Password is an optional plaintext password (dev convenience). When set
@@ -49,23 +55,6 @@ type Config struct {
 
 	// PollInterval is how often the background monitor refreshes state.
 	PollInterval Duration
-
-	AutoRestart struct {
-		Enabled bool
-		// DownFor: an interface must have a peer continuously down for at least
-		// this long before an automatic restart is attempted.
-		DownFor Duration
-		// Cooldown: minimum interval between restart attempts for one interface.
-		Cooldown Duration
-		// MaxAttempts: give up after this many attempts until the link recovers.
-		MaxAttempts int
-	}
-
-	Restart struct {
-		// Command is the restart command. "{iface}" is replaced with the
-		// interface name. Ignored in fake mode.
-		Command []string
-	}
 }
 
 // Defaults returns a config populated with sane defaults.
@@ -78,11 +67,6 @@ func Defaults() *Config {
 	c.Auth.Password = "changeme"
 	c.Thresholds.HandshakeStale = Duration(180 * time.Second)
 	c.PollInterval = Duration(5 * time.Second)
-	c.AutoRestart.Enabled = true
-	c.AutoRestart.DownFor = Duration(5 * time.Minute)
-	c.AutoRestart.Cooldown = Duration(10 * time.Minute)
-	c.AutoRestart.MaxAttempts = 3
-	c.Restart.Command = []string{"systemctl", "restart", "wg-quick@{iface}"}
 	return c
 }
 
@@ -140,6 +124,12 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("WG_COLLECTOR"); v != "" {
 		c.Collector = v
 	}
+	if v := os.Getenv("WG_TLS_CERT"); v != "" {
+		c.TLSCert = v
+	}
+	if v := os.Getenv("WG_TLS_KEY"); v != "" {
+		c.TLSKey = v
+	}
 	if v := os.Getenv("WG_AUTH_USER"); v != "" {
 		c.Auth.Username = v
 	}
@@ -157,16 +147,6 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("WG_POLL_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			c.PollInterval = Duration(d)
-		}
-	}
-	if v := os.Getenv("WG_AUTORESTART"); v != "" {
-		if b, err := parseBool(v); err == nil {
-			c.AutoRestart.Enabled = b
-		}
-	}
-	if v := os.Getenv("WG_AUTORESTART_DOWNFOR"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			c.AutoRestart.DownFor = Duration(d)
 		}
 	}
 }
@@ -189,15 +169,18 @@ func (c *Config) validate() error {
 	if c.PollInterval <= 0 {
 		return errors.New("[Server] PollInterval must be positive")
 	}
-	if c.Collector == "wg" && len(c.Restart.Command) == 0 {
-		return errors.New("[Restart] Command must be set when Collector is \"wg\"")
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return errors.New("[Server] TLSCert and TLSKey must be set together")
 	}
 	return nil
 }
 
 // String renders a redacted summary for logging.
 func (c *Config) String() string {
-	return fmt.Sprintf("listen=%s collector=%s stale=%s poll=%s autorestart=%t(downfor=%s,cooldown=%s,max=%d)",
-		c.Listen, c.Collector, c.Thresholds.HandshakeStale.D(), c.PollInterval.D(),
-		c.AutoRestart.Enabled, c.AutoRestart.DownFor.D(), c.AutoRestart.Cooldown.D(), c.AutoRestart.MaxAttempts)
+	tls := "off"
+	if c.TLSCert != "" {
+		tls = "on"
+	}
+	return fmt.Sprintf("listen=%s collector=%s tls=%s stale=%s poll=%s",
+		c.Listen, c.Collector, tls, c.Thresholds.HandshakeStale.D(), c.PollInterval.D())
 }

@@ -68,10 +68,3 @@ func TestConvertDevice(t *testing.T) {
 		t.Errorf("peerB keepalive wrong: %d", pb.PersistentKeepalive)
 	}
 }
-
-func TestCmdRestarterSubstitutesIface(t *testing.T) {
-	r := CmdRestarter{Command: []string{"echo", "restart", "{iface}"}}
-	if err := r.Restart("wg-mesh"); err != nil {
-		t.Fatalf("restart: %v", err)
-	}
-}

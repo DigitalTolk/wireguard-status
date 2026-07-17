@@ -74,20 +74,6 @@ func TestNewWGClientDefault(t *testing.T) {
 	_ = c.Close()
 }
 
-func TestCmdRestarterEmptyCommand(t *testing.T) {
-	if err := (CmdRestarter{}).Restart("wg0"); err == nil {
-		t.Fatal("empty command should error")
-	}
-}
-
-func TestCmdRestarterCommandFails(t *testing.T) {
-	// `false` exits non-zero, so Restart must surface an error.
-	r := CmdRestarter{Command: []string{"false"}}
-	if err := r.Restart("wg0"); err == nil {
-		t.Fatal("failing command should error")
-	}
-}
-
 func TestFakeCollector(t *testing.T) {
 	fc := NewFakeCollector()
 
@@ -97,12 +83,5 @@ func TestFakeCollector(t *testing.T) {
 	}
 	if len(ifaces) == 0 {
 		t.Fatal("fake collector returned no interfaces")
-	}
-
-	if err := fc.Restart("wg-mesh"); err != nil {
-		t.Errorf("restart of known interface: %v", err)
-	}
-	if err := fc.Restart("nope"); err == nil {
-		t.Error("restart of unknown interface should error")
 	}
 }

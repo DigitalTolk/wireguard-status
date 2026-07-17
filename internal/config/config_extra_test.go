@@ -23,23 +23,23 @@ func validHash(t *testing.T) string {
 func TestApplyEnvValid(t *testing.T) {
 	t.Setenv("WG_LISTEN", ":9000")
 	t.Setenv("WG_COLLECTOR", "fake")
+	t.Setenv("WG_TLS_CERT", "/tls/cert.pem")
+	t.Setenv("WG_TLS_KEY", "/tls/key.pem")
 	t.Setenv("WG_AUTH_USER", "bob")
 	t.Setenv("WG_AUTH_PASS", "pw")
 	t.Setenv("WG_AUTH_PASS_HASH", "somehash")
 	t.Setenv("WG_HANDSHAKE_STALE", "30s")
 	t.Setenv("WG_POLL_INTERVAL", "2s")
-	t.Setenv("WG_AUTORESTART", "off")
-	t.Setenv("WG_AUTORESTART_DOWNFOR", "1m")
 
 	c := Defaults()
 	c.applyEnv()
 
 	if c.Listen != ":9000" || c.Collector != "fake" || c.Auth.Username != "bob" ||
-		c.Auth.Password != "pw" || c.Auth.PasswordHash != "somehash" {
+		c.Auth.Password != "pw" || c.Auth.PasswordHash != "somehash" ||
+		c.TLSCert != "/tls/cert.pem" || c.TLSKey != "/tls/key.pem" {
 		t.Errorf("string env overrides not applied: %+v", c)
 	}
-	if c.Thresholds.HandshakeStale.D() != 30*time.Second || c.PollInterval.D() != 2*time.Second ||
-		c.AutoRestart.Enabled || c.AutoRestart.DownFor.D() != time.Minute {
+	if c.Thresholds.HandshakeStale.D() != 30*time.Second || c.PollInterval.D() != 2*time.Second {
 		t.Errorf("typed env overrides not applied: %+v", c)
 	}
 }
@@ -47,17 +47,13 @@ func TestApplyEnvValid(t *testing.T) {
 func TestApplyEnvInvalidValuesIgnored(t *testing.T) {
 	t.Setenv("WG_HANDSHAKE_STALE", "nope")
 	t.Setenv("WG_POLL_INTERVAL", "nope")
-	t.Setenv("WG_AUTORESTART", "maybe")
-	t.Setenv("WG_AUTORESTART_DOWNFOR", "nope")
 
 	c := Defaults()
 	before := *c
 	c.applyEnv()
 
 	if c.Thresholds.HandshakeStale != before.Thresholds.HandshakeStale ||
-		c.PollInterval != before.PollInterval ||
-		c.AutoRestart.Enabled != before.AutoRestart.Enabled ||
-		c.AutoRestart.DownFor != before.AutoRestart.DownFor {
+		c.PollInterval != before.PollInterval {
 		t.Error("invalid env values should be ignored, leaving defaults intact")
 	}
 }
@@ -79,11 +75,9 @@ func TestValidate(t *testing.T) {
 		"stale non-positive": func(c *Config) {
 			c.Thresholds.HandshakeStale = 0
 		},
-		"poll non-positive": func(c *Config) { c.PollInterval = 0 },
-		"wg without command": func(c *Config) {
-			c.Collector = "wg"
-			c.Restart.Command = nil
-		},
+		"poll non-positive":    func(c *Config) { c.PollInterval = 0 },
+		"tls cert without key": func(c *Config) { c.TLSCert = "/cert.pem" },
+		"tls key without cert": func(c *Config) { c.TLSKey = "/key.pem" },
 	}
 	for name, brk := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -115,9 +109,24 @@ func TestResolveAuthErrors(t *testing.T) {
 	}
 }
 
+func TestParseINITLS(t *testing.T) {
+	c := Defaults()
+	if err := c.parseINI([]byte("[Server]\nTLSCert = /etc/tls/cert.pem\nTLSKey = /etc/tls/key.pem\n")); err != nil {
+		t.Fatalf("parseINI: %v", err)
+	}
+	if c.TLSCert != "/etc/tls/cert.pem" || c.TLSKey != "/etc/tls/key.pem" {
+		t.Errorf("TLS keys not parsed: cert=%q key=%q", c.TLSCert, c.TLSKey)
+	}
+}
+
 func TestString(t *testing.T) {
-	if s := Defaults().String(); !contains(s, "listen=") || !contains(s, "collector=") {
+	if s := Defaults().String(); !contains(s, "listen=") || !contains(s, "tls=off") {
 		t.Errorf("String() = %q, missing expected fields", s)
+	}
+	c := Defaults()
+	c.TLSCert, c.TLSKey = "/c.pem", "/k.pem"
+	if s := c.String(); !contains(s, "tls=on") {
+		t.Errorf("String() with TLS = %q, want tls=on", s)
 	}
 }
 
@@ -160,16 +169,13 @@ func TestLoadEdgeCases(t *testing.T) {
 
 func TestParseINIMoreErrors(t *testing.T) {
 	cases := map[string]string{
-		"unterminated header":     "[Server\nListen = :80\n",
-		"empty header":            "[]\nKey = v\n",
-		"bad pollinterval":        "[Server]\nPollInterval = soon\n",
-		"bad downfor":             "[AutoRestart]\nDownFor = soon\n",
-		"bad cooldown":            "[AutoRestart]\nCooldown = soon\n",
-		"bad maxattempts":         "[AutoRestart]\nMaxAttempts = lots\n",
-		"auth unknown key":        "[Auth]\nNope = v\n",
-		"monitor unknown key":     "[Monitor]\nNope = v\n",
-		"autorestart unknown key": "[AutoRestart]\nNope = v\n",
-		"restart unknown key":     "[Restart]\nNope = v\n",
+		"unterminated header": "[Server\nListen = :80\n",
+		"empty header":        "[]\nKey = v\n",
+		"bad pollinterval":    "[Server]\nPollInterval = soon\n",
+		"bad handshakestale":  "[Monitor]\nHandshakeStale = soon\n",
+		"server unknown key":  "[Server]\nNope = v\n",
+		"auth unknown key":    "[Auth]\nNope = v\n",
+		"monitor unknown key": "[Monitor]\nNope = v\n",
 		// A token longer than bufio's 64KiB buffer makes the scanner error,
 		// exercising the sc.Err() path in parseSections.
 		"scanner error": strings.Repeat("a", 70000),
