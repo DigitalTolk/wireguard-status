@@ -1,0 +1,71 @@
+# GoReleaser configuration. Docs: https://goreleaser.com
+version: 2
+
+project_name: wg-status
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: wg-status
+    main: ./cmd/wg-status
+    binary: wg-status
+    env:
+      - CGO_ENABLED=0
+    # The real collector talks to WireGuard over netlink, so Linux is the only
+    # meaningful release target (matching the systemd deployment on the AWS
+    # nat-instances).
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/DigitalTolk/wireguard-status/internal/app.version={{ .Version }}
+      - -X github.com/DigitalTolk/wireguard-status/internal/app.commit={{ .Commit }}
+      - -X github.com/DigitalTolk/wireguard-status/internal/app.date={{ .CommitDate }}
+
+archives:
+  # Publish the raw binaries (no tarball) so a release asset is the executable
+  # itself — download, chmod +x, run. No unzip, no README/LICENSE to remove.
+  # The name is version-less so the stable GitHub URL always fetches the latest:
+  #   .../releases/latest/download/wg-status_linux_amd64
+  # (the binary reports its own version via `wg-status version`).
+  - id: wg-status
+    formats: [binary]
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  draft: false
+  prerelease: auto

@@ -1,0 +1,33 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+
+  settings:
+    errcheck:
+      # Writes to stdout/stderr/HTTP responses conventionally ignore their
+      # error (errcheck already excludes the fmt.Print* family by default).
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+    staticcheck:
+      # ST1005 (error strings should not be capitalized) is disabled because
+      # the config parser intentionally prefixes messages with the offending
+      # INI field name, e.g. "Cooldown: invalid duration".
+      checks:
+        - all
+        - -ST1005
+
+  exclusions:
+    paths:
+      - .github

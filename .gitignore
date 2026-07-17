@@ -1,0 +1,7 @@
+/wg-status
+/dist/
+/wg-status.conf
+/config.conf
+*.log
+/coverage.out
+/coverage.xml

@@ -1,0 +1,26 @@
+# /etc/systemd/system/wg-status.service
+#
+#   install -m0755 wg-status /usr/local/bin/wg-status
+#   install -m0640 wg-status.example.conf /etc/wg-status/wg-status.conf
+#   systemctl daemon-reload && systemctl enable --now wg-status
+#
+# Notes:
+#   - The `wg` collector reads WireGuard state over netlink, which needs
+#     CAP_NET_ADMIN and the host network namespace. wg-status is read-only and
+#     never restarts links, so it needs no other privileges.
+[Unit]
+Description=WireGuard status page
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/wg-status -config /etc/wg-status/wg-status.conf
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

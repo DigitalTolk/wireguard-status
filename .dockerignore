@@ -1,0 +1,6 @@
+.git
+*.log
+/wg-status
+/dist
+*.conf
+README.md

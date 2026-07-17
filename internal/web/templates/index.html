@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>WireGuard status</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #1b1f23; overflow-x: hidden; }
+  @media (prefers-color-scheme: dark) { body { background: #15171a; color: #e6e8eb; } }
+  header { padding: 16px 20px; border-bottom: 1px solid #d0d5dd33; display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  .banner { padding: 10px 20px; font-weight: 600; }
+  .banner.ok { background: #1a7f3722; color: #1a7f37; }
+  .banner.bad { background: #cf222e22; color: #cf222e; }
+  main { padding: 12px 20px 40px; }
+  .iface { background: #ffffff10; border: 1px solid #d0d5dd33; border-radius: 8px; margin: 14px 0; overflow: hidden; }
+  .iface > .head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #d0d5dd33; flex-wrap: wrap; }
+  .iface .name { font-weight: 700; font-size: 15px; }
+  .meta { color: #6b7280; font-size: 12px; }
+  .meta code { word-break: break-all; }
+  .downinfo { color: #9a6700; font-size: 12px; }
+  .tablewrap { width: 100%; overflow-x: auto; }
+  table { width: 100%; min-width: 900px; table-layout: fixed; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 14px; border-top: 1px solid #d0d5dd22; vertical-align: top; }
+  th { color: #6b7280; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  td.key { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+  td[data-tip] { cursor: help; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+  .badge.up { background: #1a7f3722; color: #1a7f37; }
+  .badge.down { background: #cf222e22; color: #cf222e; }
+  .badge.never { background: #9a670022; color: #9a6700; }
+  .right { text-align: right; }
+  code { font-family: ui-monospace, monospace; }
+  .rdns-tip {
+    position: fixed; z-index: 20; display: none;
+    background: #1b1f23; color: #fff; padding: 4px 9px; border-radius: 6px;
+    font: 12px ui-monospace, monospace; pointer-events: none;
+    box-shadow: 0 2px 10px #0005; max-width: 60vw; word-break: break-all;
+  }
+  @media (prefers-color-scheme: dark) { .rdns-tip { background: #e6e8eb; color: #15171a; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>WireGuard status</h1>
+  <span class="meta" id="meta"></span>
+</header>
+<div id="app"><main><p class="meta">Loading…</p></main></div>
+
+<script>
+(function () {
+  var REFRESH_MS = 10000;
+  var FETCH_TIMEOUT_MS = 2000;
+  var app = document.getElementById('app');
+  var meta = document.getElementById('meta');
+
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    if (attrs) for (var k in attrs) {
+      if (k === 'class') e.className = attrs[k];
+      else if (k === 'text') e.textContent = attrs[k];
+      else e.setAttribute(k, attrs[k]);
+    }
+    (children || []).forEach(function (c) { if (c) e.appendChild(c); });
+    return e;
+  }
+
+  function fmtBytes(b) {
+    if (b < 1024) return b + ' B';
+    var u = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'], i = -1, n = b;
+    do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+    return n.toFixed(1) + ' ' + u[i];
+  }
+  function fmtDur(s) {
+    s = Math.max(0, Math.round(s));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+  }
+  function badgeClass(state) { return state === 'up' ? 'up' : (state === 'never' ? 'never' : 'down'); }
+  // Age from the server's own timestamps, so a skewed client clock can't lie.
+  function handshake(p, genMs) {
+    if (!p.last_handshake) return 'never';
+    return fmtDur((genMs - Date.parse(p.last_handshake)) / 1000);
+  }
+
+  function peerRow(p, genMs) {
+    var endpoint = el('td', { class: 'key', text: p.endpoint || '—' });
+    if (p.endpoint_dns) endpoint.setAttribute('data-tip', p.endpoint_dns);
+    return el('tr', null, [
+      endpoint,
+      el('td', { class: 'key', text: p.public_key }),
+      el('td', null, [el('span', { class: 'badge ' + badgeClass(p.state), text: p.state })]),
+      el('td', { class: 'key', text: (p.allowed_ips || []).join(', ') || '—' }),
+      el('td', { text: handshake(p, genMs) }),
+      el('td', { text: p.persistent_keepalive ? p.persistent_keepalive + 's' : 'off' }),
+      el('td', { class: 'right', text: fmtBytes(p.rx_bytes) }),
+      el('td', { class: 'right', text: fmtBytes(p.tx_bytes) })
+    ]);
+  }
+
+  function ifaceSection(iface, genMs) {
+    var badgeText = !iface.present ? 'missing' : (iface.degraded ? 'degraded' : 'healthy');
+    var headKids = [
+      el('span', { class: 'name', text: iface.name }),
+      el('span', { class: 'badge ' + (iface.degraded ? 'down' : 'up'), text: badgeText })
+    ];
+    if (iface.present) {
+      headKids.push(el('span', { class: 'meta' }, [
+        document.createTextNode(':' + iface.listen_port + ' · pubkey '),
+        el('code', { text: iface.public_key })
+      ]));
+    }
+    var kids = [el('div', { class: 'head' }, headKids)];
+
+    // A known interface that is no longer present: no peer table to show.
+    if (!iface.present) {
+      kids.push(el('div', { class: 'head downinfo',
+        text: 'interface not present' + (iface.down_for_seconds ? ' · down for ' + fmtDur(iface.down_for_seconds) : '') }));
+      return el('section', { class: 'iface' }, kids);
+    }
+
+    if (iface.down_for_seconds) {
+      kids.push(el('div', { class: 'head downinfo', text: 'down for ' + fmtDur(iface.down_for_seconds) }));
+    }
+    var colgroup = el('colgroup', null, [14, 22, 8, 14, 12, 10, 10, 10].map(function (w) {
+      return el('col', { style: 'width:' + w + '%' });
+    }));
+    var thead = el('thead', null, [el('tr', null,
+      ['Endpoint', 'Peer', 'State', 'Allowed IPs', 'Last handshake', 'keepalive'].map(function (t) { return el('th', { text: t }); })
+        .concat([el('th', { class: 'right', text: 'rx' }), el('th', { class: 'right', text: 'tx' })]))]);
+    var tbody = el('tbody', null, (iface.peers || []).map(function (p) { return peerRow(p, genMs); }));
+    kids.push(el('div', { class: 'tablewrap' }, [el('table', null, [colgroup, thead, tbody])]));
+    return el('section', { class: 'iface' }, kids);
+  }
+
+  function render(st) {
+    var genMs = Date.parse(st.generated_at);
+    document.title = st.degraded ? 'WireGuard status — DEGRADED' : 'WireGuard status';
+    meta.textContent = 'generated ' + new Date(genMs).toLocaleTimeString() +
+      ' · refresh ' + (REFRESH_MS / 1000) + 's · stale > ' + fmtDur(st.handshake_stale_seconds);
+
+    var frag = document.createDocumentFragment();
+    frag.appendChild(el('div', { class: 'banner ' + (st.degraded ? 'bad' : 'ok'),
+      text: st.degraded ? 'DEGRADED — one or more monitored peers are down' : 'All monitored peers up' }));
+    var m = el('main');
+    if (st.error) {
+      m.appendChild(el('div', { class: 'iface' }, [
+        el('div', { class: 'head' }, [el('span', { class: 'name', text: 'collector error' })]),
+        el('div', { class: 'tablewrap', text: st.error })
+      ]));
+    }
+    (st.interfaces || []).forEach(function (iface) { m.appendChild(ifaceSection(iface, genMs)); });
+    frag.appendChild(m);
+
+    app.replaceChildren(frag);
+  }
+
+  function disconnected() {
+    document.title = 'WireGuard status — offline';
+    meta.textContent = 'disconnected — retrying every ' + (REFRESH_MS / 1000) + 's';
+  }
+
+  // Floating reverse-DNS tooltip, delegated on #app (which persists).
+  var tip = el('div', { class: 'rdns-tip' });
+  document.body.appendChild(tip);
+  function place(e) { tip.style.left = (e.clientX + 12) + 'px'; tip.style.top = (e.clientY + 14) + 'px'; }
+  app.addEventListener('mouseover', function (e) {
+    var t = e.target.closest('[data-tip]');
+    if (t) { tip.textContent = t.getAttribute('data-tip'); tip.style.display = 'block'; place(e); }
+  });
+  app.addEventListener('mousemove', function (e) { if (tip.style.display === 'block') place(e); });
+  app.addEventListener('mouseout', function (e) { if (e.target.closest('[data-tip]')) tip.style.display = 'none'; });
+
+  function poll() {
+    if (document.hidden) return; // don't poll background tabs
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS);
+    fetch('/status?strict=0', { headers: { 'X-Requested-With': 'fetch' }, signal: ctrl.signal })
+      .then(function (r) {
+        clearTimeout(timer);
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(render)
+      .catch(function () { clearTimeout(timer); disconnected(); });
+  }
+  poll();
+  setInterval(poll, REFRESH_MS);
+  // Refresh immediately when returning to the tab.
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+})();
+</script>
+</body>
+</html>
