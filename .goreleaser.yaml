@@ -13,14 +13,18 @@ builds:
     binary: wg-status
     env:
       - CGO_ENABLED=0
-    # The real collector talks to WireGuard over netlink, so Linux is the only
-    # meaningful release target (matching the systemd deployment on the AWS
-    # nat-instances).
+    # Linux is the real deployment target (the collector reads WireGuard over
+    # netlink). darwin/arm64 is added for local use on Apple Silicon, where
+    # wgctrl falls back to the userspace UAPI. macOS Intel is not built.
     goos:
       - linux
+      - darwin
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
     flags:
       - -trimpath
     ldflags:
