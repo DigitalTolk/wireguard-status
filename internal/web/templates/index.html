@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{{.Refresh}}">
+<title>WireGuard status{{if .Degraded}} — DEGRADED{{end}}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #1b1f23; }
+  @media (prefers-color-scheme: dark) { body { background: #15171a; color: #e6e8eb; } }
+  header { padding: 16px 20px; border-bottom: 1px solid #d0d5dd33; display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  .banner { padding: 10px 20px; font-weight: 600; }
+  .banner.ok { background: #1a7f3722; color: #1a7f37; }
+  .banner.bad { background: #cf222e22; color: #cf222e; }
+  main { padding: 12px 20px 40px; max-width: 1100px; }
+  .iface { background: #ffffff10; border: 1px solid #d0d5dd33; border-radius: 8px; margin: 14px 0; overflow: hidden; }
+  .iface > .head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #d0d5dd33; flex-wrap: wrap; }
+  .iface .name { font-weight: 700; font-size: 15px; }
+  .meta { color: #6b7280; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 14px; border-top: 1px solid #d0d5dd22; white-space: nowrap; }
+  th { color: #6b7280; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  td.key { font-family: ui-monospace, monospace; font-size: 12px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+  .badge.up { background: #1a7f3722; color: #1a7f37; }
+  .badge.down { background: #cf222e22; color: #cf222e; }
+  .badge.never { background: #9a670022; color: #9a6700; }
+  .right { text-align: right; }
+  form { display: inline; }
+  button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #cf222e88; background: transparent; color: #cf222e; cursor: pointer; }
+  button:hover { background: #cf222e22; }
+  .restartinfo { color: #9a6700; font-size: 12px; }
+  footer { color: #6b7280; font-size: 12px; padding: 0 20px 24px; }
+  code { font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WireGuard status</h1>
+  <span class="meta">generated {{localtime .Now}} · refresh {{.Refresh}}s · stale &gt; {{duration .Stale}}</span>
+</header>
+
+{{if .Degraded}}
+  <div class="banner bad">⚠ DEGRADED — one or more monitored peers are down (HTTP 503)</div>
+{{else}}
+  <div class="banner ok">✓ All monitored peers up</div>
+{{end}}
+
+<main>
+{{if .Report.Err}}
+  <div class="iface"><div class="head"><span class="name">collector error</span></div>
+  <table><tr><td class="key">{{.Report.Err}}</td></tr></table></div>
+{{end}}
+
+{{range .Report.Interfaces}}
+  <section class="iface">
+    <div class="head">
+      <span class="name">{{.Name}}</span>
+      {{if .Degraded}}<span class="badge down">degraded</span>{{else}}<span class="badge up">healthy</span>{{end}}
+      <span class="meta">:{{.ListenPort}} · pubkey <code title="{{.PublicKey}}">{{slice .PublicKey 0 8}}…</code></span>
+      {{if .Degraded}}
+        <span style="margin-left:auto"></span>
+        <form method="post" action="/restart/{{.Name}}">
+          <button type="submit">Restart {{.Name}}</button>
+        </form>
+      {{end}}
+    </div>
+
+    {{if not .DownSince.IsZero}}
+      <div class="head restartinfo">
+        down for {{duration (.DownFor $.Now)}}
+        {{if .AutoRestart}}· auto-restart on{{else}}· auto-restart off{{end}}
+        {{if not .LastRestart.IsZero}}· last restart {{ago .LastRestart}} (attempt {{.RestartAttempts}}){{end}}
+        {{if .LastRestartErr}}· error: {{.LastRestartErr}}{{end}}
+      </div>
+    {{end}}
+
+    <table>
+      <thead>
+        <tr>
+          <th>Peer</th><th>State</th><th>Endpoint</th><th>Allowed IPs</th>
+          <th>Last handshake</th><th class="right">↓ rx</th><th class="right">↑ tx</th><th>keepalive</th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Peers}}
+        <tr>
+          <td>{{.Name}}<br><span class="meta key" title="{{.PublicKey}}">{{slice .PublicKey 0 12}}…</span></td>
+          <td><span class="badge {{badge .State}}">{{.State}}</span></td>
+          <td class="key">{{if .Endpoint}}{{.Endpoint}}{{else}}—{{end}}</td>
+          <td class="key">{{if .AllowedIPs}}{{join .AllowedIPs}}{{else}}—{{end}}</td>
+          <td>{{ago .LastHandshake}}</td>
+          <td class="right">{{bytes .RxBytes}}</td>
+          <td class="right">{{bytes .TxBytes}}</td>
+          <td>{{if .PersistentKeepalive}}{{.PersistentKeepalive}}s{{else}}off{{end}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </section>
+{{end}}
+</main>
+
+<footer>
+  uptime-kuma: monitor <code>GET /</code> (or <code>GET /healthz</code>) — returns 503 while degraded. Append <code>?strict=0</code> to browse without 503.
+</footer>
+</body>
+</html>

@@ -1,0 +1,5 @@
+/wg-status
+/dist/
+/wg-status.conf
+/config.conf
+*.log

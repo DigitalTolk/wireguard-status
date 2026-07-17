@@ -1,0 +1,19 @@
+# Local end-to-end demo: fake collector, short thresholds so you can watch a
+# mesh peer flap (up -> stale -> 503 -> auto-restart -> up) within ~1 minute.
+#
+#   docker compose up --build
+#   open http://localhost:8600            (admin / secret)
+#   watch -n2 'curl -s -o /dev/null -w "%{http_code}\n" -u admin:secret localhost:8600/healthz'
+services:
+  wg-status:
+    build: .
+    ports:
+      - "8600:8080"
+    environment:
+      WG_COLLECTOR: fake
+      WG_AUTH_USER: admin
+      WG_AUTH_PASS: secret
+      WG_HANDSHAKE_STALE: 45s
+      WG_POLL_INTERVAL: 2s
+      WG_AUTORESTART_DOWNFOR: 20s
+    restart: unless-stopped
