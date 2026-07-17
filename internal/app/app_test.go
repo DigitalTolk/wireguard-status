@@ -42,12 +42,15 @@ func TestRunFlagError(t *testing.T) {
 }
 
 func TestRunVersion(t *testing.T) {
-	var out, errb bytes.Buffer
-	if code := Run(context.Background(), []string{"-version"}, nil, &out, &errb); code != 0 {
-		t.Errorf("version: got %d, want 0", code)
-	}
-	if !strings.Contains(out.String(), "wg-status") {
-		t.Errorf("version output = %q", out.String())
+	// Both the `-version` flag and the `version` subcommand print the build info.
+	for _, args := range [][]string{{"-version"}, {"version"}} {
+		var out, errb bytes.Buffer
+		if code := Run(context.Background(), args, nil, &out, &errb); code != 0 {
+			t.Errorf("%v: got %d, want 0", args, code)
+		}
+		if !strings.Contains(out.String(), "wg-status ") {
+			t.Errorf("%v output = %q", args, out.String())
+		}
 	}
 }
 

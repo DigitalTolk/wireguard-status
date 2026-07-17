@@ -34,10 +34,21 @@ var (
 // path (auth.Hash only fails if the system RNG does).
 var hashFn = auth.Hash
 
+// versionString renders the GoReleaser-injected build metadata.
+func versionString() string {
+	return fmt.Sprintf("wg-status %s (commit %s, built %s)", version, commit, date)
+}
+
 // Run parses args, loads config and serves until ctx is cancelled. It returns a
 // process exit code and never calls os.Exit, so it is fully testable. stdout is
 // used for the -version/-hash-password output; stderr for diagnostics.
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// `wg-status version` (subcommand) as well as `-version` (flag) below.
+	if len(args) > 0 && args[0] == "version" {
+		fmt.Fprintln(stdout, versionString())
+		return 0
+	}
+
 	fs := flag.NewFlagSet("wg-status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", envOr("WG_CONFIG", "wg-status.conf"), "path to INI config file (optional)")
@@ -48,7 +59,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	if *showVersion {
-		fmt.Fprintf(stdout, "wg-status %s (commit %s, built %s)\n", version, commit, date)
+		fmt.Fprintln(stdout, versionString())
 		return 0
 	}
 
