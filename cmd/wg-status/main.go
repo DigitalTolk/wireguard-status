@@ -24,10 +24,23 @@ import (
 	"github.com/DigitalTolk/wireguard-status/internal/wg"
 )
 
+// Build metadata, injected at release time via -ldflags by GoReleaser.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	cfgPath := flag.String("config", envOr("WG_CONFIG", "wg-status.conf"), "path to INI config file (optional)")
 	hashPw := flag.Bool("hash-password", false, "read a password from stdin and print its hash for [Auth] PasswordHash, then exit")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("wg-status %s (commit %s, built %s)\n", version, commit, date)
+		os.Exit(0)
+	}
 
 	if *hashPw {
 		hashPasswordAndExit()
