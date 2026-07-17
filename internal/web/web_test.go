@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +56,19 @@ func (g genColl) Collect() ([]wg.Interface, error) {
 type errColl struct{}
 
 func (errColl) Collect() ([]wg.Interface, error) { return nil, errors.New("collect boom") }
+
+// muxColl is a mutable collector so a test can make an interface vanish.
+type muxColl struct {
+	mu     sync.Mutex
+	ifaces []wg.Interface
+}
+
+func (c *muxColl) set(ifaces []wg.Interface) { c.mu.Lock(); c.ifaces = ifaces; c.mu.Unlock() }
+func (c *muxColl) Collect() ([]wg.Interface, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ifaces, nil
+}
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
@@ -264,6 +278,43 @@ func TestHandleStatusIface(t *testing.T) {
 	// Unknown interface -> 404.
 	if rec := get(t, srv, http.MethodGet, "/status/ghost", true); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown iface: got %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleStatusMissingInterface(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.PollInterval = config.Duration(time.Millisecond)
+	c := &muxColl{}
+	c.set([]wg.Interface{{Name: "wg0", PublicKey: "K", ListenPort: 51820,
+		Peers: []wg.Peer{{PublicKey: "p", LastHandshake: time.Now()}}}})
+	mon := status.NewMonitor(cfg, c)
+
+	stop := make(chan struct{})
+	go mon.Run(stop)
+	defer close(stop)
+
+	// Establish wg0 as known & healthy, then make it vanish.
+	waitFor(t, func() bool {
+		r := mon.Latest()
+		return len(r.Interfaces) == 1 && r.Interfaces[0].Present
+	})
+	c.set(nil)
+	waitFor(t, func() bool {
+		r := mon.Latest()
+		return len(r.Interfaces) == 1 && !r.Interfaces[0].Present
+	})
+
+	srv := NewServer(cfg, mon)
+	srv.dns.lookup = func(string) ([]string, error) { return nil, nil }
+
+	// The whole-fleet view marks it not present and degraded.
+	rec := get(t, srv, http.MethodGet, "/status", true)
+	if body := rec.Body.String(); !contains(body, `"present":false`) || !contains(body, `"degraded":true`) {
+		t.Errorf("missing interface should be present:false degraded:true: %s", body)
+	}
+	// A watchdog on the missing interface sees 503.
+	if rec := get(t, srv, http.MethodGet, "/status/wg0", true); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("missing iface /status/wg0: got %d, want 503", rec.Code)
 	}
 }
 

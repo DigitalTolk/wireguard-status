@@ -20,7 +20,8 @@ and persistent-keepalive. A peer is **down** when its last handshake is older
 than `thresholds.handshake_stale` (default 180s). Hovering an endpoint shows its
 **reverse-DNS** name (resolved in the background and cached in memory for a day).
 The page is a small client that renders from `GET /status` and re-polls it every
-few seconds — no full reloads.
+~10s — no full reloads. It pauses in background tabs and shows a *disconnected*
+state if `/status` becomes unreachable.
 
 ## Endpoints
 
@@ -54,8 +55,14 @@ printf '%s' 'your-password' | wg-status -hash-password
 ## Peers are auto-detected
 
 You do **not** list peers or interfaces. Every interface and peer that WireGuard
-reports is discovered automatically and monitored — any stale peer flips the page
-to 503. There is no per-peer or per-interface config.
+reports is discovered automatically and monitored — any stale peer flips
+`/status` to 503. There is no per-peer or per-interface config.
+
+Once an interface has been seen it is **expected to stay present**: if it later
+disappears from WireGuard (or collection fails), it is reported as **down** — so a
+vanished link still alerts, and `GET /status/{iface}` keeps returning 503 for it.
+(A genuinely decommissioned interface therefore shows as down until wg-status is
+restarted.)
 
 ## Run it locally (full demo, no WireGuard needed)
 

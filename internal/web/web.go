@@ -118,6 +118,8 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 // page fetches GET /status and renders itself; health checks use /status.
 func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The shell is tiny and changes on deploy — revalidate rather than cache.
+	w.Header().Set("Cache-Control", "no-cache")
 	_ = s.tpl.ExecuteTemplate(w, "index.html", nil)
 }
 
@@ -139,6 +141,7 @@ type ifaceJSON struct {
 	Name       string     `json:"name"`
 	PublicKey  string     `json:"public_key"`
 	ListenPort int        `json:"listen_port"`
+	Present    bool       `json:"present"` // false when a known interface is missing
 	Degraded   bool       `json:"degraded"`
 	PeersTotal int        `json:"peers_total"`
 	PeersDown  int        `json:"peers_down"`
@@ -161,6 +164,7 @@ func (s *Server) buildIface(ir status.InterfaceReport, now time.Time) ifaceJSON 
 		Name:       ir.Name,
 		PublicKey:  ir.PublicKey,
 		ListenPort: ir.ListenPort,
+		Present:    ir.Present,
 		Degraded:   ir.Degraded,
 		PeersTotal: len(ir.Peers),
 		Peers:      []peerJSON{},
@@ -209,6 +213,8 @@ func (s *Server) buildStatus(rep *status.Report) statusJSON {
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// Live state that is polled — never serve it from a cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

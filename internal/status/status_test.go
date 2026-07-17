@@ -20,23 +20,24 @@ type fixedColl struct{ ifaces []wg.Interface }
 
 func (f fixedColl) Collect() ([]wg.Interface, error) { return f.ifaces, nil }
 
-// toggleColl returns a degraded or healthy interface depending on a mutable
-// flag, so a single monitor can transition between states across ticks.
-type toggleColl struct {
-	mu   sync.Mutex
-	down bool
+// listColl is a mutable collector so a single monitor can watch interfaces
+// appear, disappear and error across ticks.
+type listColl struct {
+	mu     sync.Mutex
+	ifaces []wg.Interface
+	err    error
 }
 
-func (t *toggleColl) set(down bool) { t.mu.Lock(); t.down = down; t.mu.Unlock() }
+func (l *listColl) set(ifaces []wg.Interface, err error) {
+	l.mu.Lock()
+	l.ifaces, l.err = ifaces, err
+	l.mu.Unlock()
+}
 
-func (t *toggleColl) Collect() ([]wg.Interface, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	hs := time.Now()
-	if t.down {
-		hs = time.Now().Add(-time.Hour)
-	}
-	return []wg.Interface{{Name: "wg0", Peers: []wg.Peer{{Interface: "wg0", PublicKey: "K", LastHandshake: hs}}}}, nil
+func (l *listColl) Collect() ([]wg.Interface, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.ifaces, l.err
 }
 
 func testCfg() *config.Config {
@@ -47,6 +48,10 @@ func testCfg() *config.Config {
 
 func healthyIfaces() []wg.Interface {
 	return []wg.Interface{{Name: "wg0", Peers: []wg.Peer{{Interface: "wg0", PublicKey: "K", LastHandshake: time.Now()}}}}
+}
+
+func downIfaces() []wg.Interface {
+	return []wg.Interface{{Name: "wg0", Peers: []wg.Peer{{Interface: "wg0", PublicKey: "d", LastHandshake: time.Now().Add(-time.Hour)}}}}
 }
 
 // --- small pure helpers -----------------------------------------------------
@@ -85,8 +90,28 @@ func TestLatestComputesThenCaches(t *testing.T) {
 func TestTickCollectorError(t *testing.T) {
 	m := NewMonitor(testCfg(), errColl{})
 	rep := m.tick()
+	if rep.Err == "" || !rep.Degraded || len(rep.Interfaces) != 0 {
+		t.Errorf("first-tick collector error: %+v", rep)
+	}
+}
+
+func TestTickCollectorErrorWithKnown(t *testing.T) {
+	c := &listColl{}
+	m := NewMonitor(testCfg(), c)
+	c.set(healthyIfaces(), nil)
+	m.tick() // wg0 now known & healthy
+
+	c.set(nil, errors.New("netlink gone"))
+	rep := m.tick()
 	if rep.Err == "" || !rep.Degraded {
-		t.Errorf("collector error should set Err and Degraded: %+v", rep)
+		t.Fatalf("collector error should set Err+Degraded: %+v", rep)
+	}
+	if len(rep.Interfaces) != 1 {
+		t.Fatalf("known interface should still be reported: %+v", rep.Interfaces)
+	}
+	ir := rep.Interfaces[0]
+	if ir.Name != "wg0" || ir.Present || !ir.Degraded {
+		t.Errorf("known interface should be down on collector error: %+v", ir)
 	}
 }
 
@@ -123,29 +148,88 @@ func TestTickHealthyNotDegraded(t *testing.T) {
 	if rep.Degraded {
 		t.Error("an all-up interface should not be degraded")
 	}
-	if !rep.Interfaces[0].DownSince.IsZero() {
-		t.Error("a healthy interface should have zero DownSince")
+	if !rep.Interfaces[0].Present || !rep.Interfaces[0].DownSince.IsZero() {
+		t.Errorf("healthy interface should be present with zero DownSince: %+v", rep.Interfaces[0])
 	}
 }
 
-func TestTickDownSincePersistsThenResets(t *testing.T) {
-	coll := &toggleColl{down: true}
-	m := NewMonitor(testCfg(), coll)
-
+func TestTickDownSincePersists(t *testing.T) {
+	m := NewMonitor(testCfg(), fixedColl{downIfaces()})
 	m.tick()
-	first := m.downSince["wg0"]
+	first := m.known["wg0"].downSince
 	if first.IsZero() {
-		t.Fatal("downSince should be set while degraded")
+		t.Fatal("degraded interface should set downSince")
 	}
-	m.tick() // still degraded -> downSince unchanged (else branch)
-	if !m.downSince["wg0"].Equal(first) {
-		t.Error("downSince should persist across ticks while degraded")
+	m.tick() // still degraded -> downSince unchanged
+	if !m.known["wg0"].downSince.Equal(first) {
+		t.Error("downSince should persist across consecutive degraded ticks")
+	}
+}
+
+func TestTickMissingInterface(t *testing.T) {
+	c := &listColl{}
+	m := NewMonitor(testCfg(), c)
+
+	c.set(healthyIfaces(), nil)
+	if rep := m.tick(); rep.Degraded || !rep.Interfaces[0].Present {
+		t.Fatalf("wg0 should be present & healthy: %+v", rep.Interfaces)
 	}
 
-	coll.set(false)
-	m.tick() // healthy -> cleared
-	if _, ok := m.downSince["wg0"]; ok {
-		t.Error("downSince should be cleared when the interface recovers")
+	// Disappears -> reported down (missing).
+	c.set(nil, nil)
+	rep := m.tick()
+	if !rep.Degraded || len(rep.Interfaces) != 1 {
+		t.Fatalf("missing wg0 should be degraded: %+v", rep)
+	}
+	ir := rep.Interfaces[0]
+	if ir.Name != "wg0" || ir.Present || !ir.Degraded || ir.DownSince.IsZero() {
+		t.Errorf("missing wg0 report wrong: %+v", ir)
+	}
+	missingSince := ir.DownSince
+
+	// Still missing -> downSince persists.
+	if rep := m.tick(); !rep.Interfaces[0].DownSince.Equal(missingSince) {
+		t.Error("missing interface downSince should persist")
+	}
+
+	// Reappears healthy -> present, down cleared.
+	c.set(healthyIfaces(), nil)
+	rep = m.tick()
+	if rep.Degraded || !rep.Interfaces[0].Present || !rep.Interfaces[0].DownSince.IsZero() {
+		t.Errorf("reappeared wg0 should be healthy with cleared down: %+v", rep.Interfaces[0])
+	}
+}
+
+func TestTickReappearResetsTimer(t *testing.T) {
+	c := &listColl{}
+	m := NewMonitor(testCfg(), c)
+
+	c.set(healthyIfaces(), nil)
+	m.tick()
+	c.set(nil, nil)
+	m.tick() // missing since ~now
+	missingSince := m.known["wg0"].downSince
+	time.Sleep(5 * time.Millisecond)
+
+	// Reappears still degraded -> the down timer resets to reappearance, not the
+	// stale missing time.
+	c.set(downIfaces(), nil)
+	rep := m.tick()
+	if ds := rep.Interfaces[0].DownSince; !ds.After(missingSince) {
+		t.Errorf("reappearance should reset the down timer: was %v now %v", missingSince, ds)
+	}
+}
+
+func TestTickSortsInterfaces(t *testing.T) {
+	c := &listColl{}
+	m := NewMonitor(testCfg(), c)
+	c.set([]wg.Interface{
+		{Name: "wg2", Peers: []wg.Peer{{PublicKey: "b", LastHandshake: time.Now()}}},
+		{Name: "wg0", Peers: []wg.Peer{{PublicKey: "a", LastHandshake: time.Now()}}},
+	}, nil)
+	rep := m.tick()
+	if len(rep.Interfaces) != 2 || rep.Interfaces[0].Name != "wg0" || rep.Interfaces[1].Name != "wg2" {
+		t.Errorf("interfaces should be sorted by name: %+v", rep.Interfaces)
 	}
 }
 

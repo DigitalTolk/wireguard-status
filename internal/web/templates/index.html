@@ -52,7 +52,8 @@
 
 <script>
 (function () {
-  var REFRESH_MS = 5000;
+  var REFRESH_MS = 10000;
+  var FETCH_TIMEOUT_MS = 2000;
   var app = document.getElementById('app');
   var meta = document.getElementById('meta');
 
@@ -81,12 +82,13 @@
     return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
   }
   function badgeClass(state) { return state === 'up' ? 'up' : (state === 'never' ? 'never' : 'down'); }
-  function handshake(p) {
+  // Age from the server's own timestamps, so a skewed client clock can't lie.
+  function handshake(p, genMs) {
     if (!p.last_handshake) return 'never';
-    return fmtDur((Date.now() - Date.parse(p.last_handshake)) / 1000);
+    return fmtDur((genMs - Date.parse(p.last_handshake)) / 1000);
   }
 
-  function peerRow(p) {
+  function peerRow(p, genMs) {
     var endpoint = el('td', { class: 'key', text: p.endpoint || '—' });
     if (p.endpoint_dns) endpoint.setAttribute('data-tip', p.endpoint_dns);
     return el('tr', null, [
@@ -94,23 +96,34 @@
       el('td', { class: 'key', text: p.public_key }),
       el('td', null, [el('span', { class: 'badge ' + badgeClass(p.state), text: p.state })]),
       el('td', { class: 'key', text: (p.allowed_ips || []).join(', ') || '—' }),
-      el('td', { text: handshake(p) }),
+      el('td', { text: handshake(p, genMs) }),
       el('td', { text: p.persistent_keepalive ? p.persistent_keepalive + 's' : 'off' }),
       el('td', { class: 'right', text: fmtBytes(p.rx_bytes) }),
       el('td', { class: 'right', text: fmtBytes(p.tx_bytes) })
     ]);
   }
 
-  function ifaceSection(iface) {
-    var head = el('div', { class: 'head' }, [
+  function ifaceSection(iface, genMs) {
+    var badgeText = !iface.present ? 'missing' : (iface.degraded ? 'degraded' : 'healthy');
+    var headKids = [
       el('span', { class: 'name', text: iface.name }),
-      el('span', { class: 'badge ' + (iface.degraded ? 'down' : 'up'), text: iface.degraded ? 'degraded' : 'healthy' }),
-      el('span', { class: 'meta' }, [
+      el('span', { class: 'badge ' + (iface.degraded ? 'down' : 'up'), text: badgeText })
+    ];
+    if (iface.present) {
+      headKids.push(el('span', { class: 'meta' }, [
         document.createTextNode(':' + iface.listen_port + ' · pubkey '),
         el('code', { text: iface.public_key })
-      ])
-    ]);
-    var kids = [head];
+      ]));
+    }
+    var kids = [el('div', { class: 'head' }, headKids)];
+
+    // A known interface that is no longer present: no peer table to show.
+    if (!iface.present) {
+      kids.push(el('div', { class: 'head downinfo',
+        text: 'interface not present' + (iface.down_for_seconds ? ' · down for ' + fmtDur(iface.down_for_seconds) : '') }));
+      return el('section', { class: 'iface' }, kids);
+    }
+
     if (iface.down_for_seconds) {
       kids.push(el('div', { class: 'head downinfo', text: 'down for ' + fmtDur(iface.down_for_seconds) }));
     }
@@ -120,19 +133,20 @@
     var thead = el('thead', null, [el('tr', null,
       ['Endpoint', 'Peer', 'State', 'Allowed IPs', 'Last handshake', 'keepalive'].map(function (t) { return el('th', { text: t }); })
         .concat([el('th', { class: 'right', text: 'rx' }), el('th', { class: 'right', text: 'tx' })]))]);
-    var tbody = el('tbody', null, (iface.peers || []).map(peerRow));
+    var tbody = el('tbody', null, (iface.peers || []).map(function (p) { return peerRow(p, genMs); }));
     kids.push(el('div', { class: 'tablewrap' }, [el('table', null, [colgroup, thead, tbody])]));
     return el('section', { class: 'iface' }, kids);
   }
 
   function render(st) {
+    var genMs = Date.parse(st.generated_at);
     document.title = st.degraded ? 'WireGuard status — DEGRADED' : 'WireGuard status';
-    meta.textContent = 'generated ' + new Date(st.generated_at).toLocaleTimeString() +
+    meta.textContent = 'generated ' + new Date(genMs).toLocaleTimeString() +
       ' · refresh ' + (REFRESH_MS / 1000) + 's · stale > ' + fmtDur(st.handshake_stale_seconds);
 
     var frag = document.createDocumentFragment();
     frag.appendChild(el('div', { class: 'banner ' + (st.degraded ? 'bad' : 'ok'),
-      text: st.degraded ? 'DEGRADED — one or more monitored peers are down (HTTP 503)' : 'All monitored peers up' }));
+      text: st.degraded ? 'DEGRADED — one or more monitored peers are down' : 'All monitored peers up' }));
     var m = el('main');
     if (st.error) {
       m.appendChild(el('div', { class: 'iface' }, [
@@ -140,10 +154,15 @@
         el('div', { class: 'tablewrap', text: st.error })
       ]));
     }
-    (st.interfaces || []).forEach(function (iface) { m.appendChild(ifaceSection(iface)); });
+    (st.interfaces || []).forEach(function (iface) { m.appendChild(ifaceSection(iface, genMs)); });
     frag.appendChild(m);
 
     app.replaceChildren(frag);
+  }
+
+  function disconnected() {
+    document.title = 'WireGuard status — offline';
+    meta.textContent = 'disconnected — retrying every ' + (REFRESH_MS / 1000) + 's';
   }
 
   // Floating reverse-DNS tooltip, delegated on #app (which persists).
@@ -158,13 +177,22 @@
   app.addEventListener('mouseout', function (e) { if (e.target.closest('[data-tip]')) tip.style.display = 'none'; });
 
   function poll() {
-    fetch('/status?strict=0', { headers: { 'X-Requested-With': 'fetch' } })
-      .then(function (r) { return r.json(); })
+    if (document.hidden) return; // don't poll background tabs
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS);
+    fetch('/status?strict=0', { headers: { 'X-Requested-With': 'fetch' }, signal: ctrl.signal })
+      .then(function (r) {
+        clearTimeout(timer);
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
       .then(render)
-      .catch(function () {});
+      .catch(function () { clearTimeout(timer); disconnected(); });
   }
   poll();
   setInterval(poll, REFRESH_MS);
+  // Refresh immediately when returning to the tab.
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
 })();
 </script>
 </body>
