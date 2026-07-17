@@ -32,8 +32,18 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Coverage is measured over ./internal/... (all the real logic);
+      # cmd/wg-status is a thin main() shim that only wires signals to
+      # internal/app.Run and is deliberately excluded from the 100% gate.
       - name: Test
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./internal/...
+
+      # Enforce the 100% coverage gate and publish the breakdown straight to
+      # the GitHub Actions job summary (and as a PR check).
+      - name: Check and publish coverage
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          config: ./.testcoverage.yml
 
   lint:
     name: Lint

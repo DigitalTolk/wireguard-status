@@ -19,6 +19,10 @@ type Duration time.Duration
 
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
+// hashFn is a seam over auth.Hash so tests can exercise the hashing-failure
+// path in resolveAuth (auth.Hash only fails if the system RNG does).
+var hashFn = auth.Hash
+
 // Config is the full application configuration.
 type Config struct {
 	// Listen is the HTTP listen address, e.g. ":8080".
@@ -119,7 +123,7 @@ func (c *Config) resolveAuth() error {
 	if c.Auth.Password == "" {
 		return errors.New("[Auth] needs PasswordHash (preferred) or Password")
 	}
-	h, err := auth.Hash(c.Auth.Password)
+	h, err := hashFn(c.Auth.Password)
 	if err != nil {
 		return fmt.Errorf("hash password: %w", err)
 	}

@@ -27,10 +27,14 @@ const (
 
 var enc = base64.RawStdEncoding
 
+// randRead is a seam over crypto/rand.Read so tests can exercise the
+// (otherwise unreachable) RNG-failure path.
+var randRead = rand.Read
+
 // Hash returns an encoded PBKDF2 hash of plain using a fresh random salt.
 func Hash(plain string) (string, error) {
 	salt := make([]byte, saltLen)
-	if _, err := rand.Read(salt); err != nil {
+	if _, err := randRead(salt); err != nil {
 		return "", err
 	}
 	dk := pbkdf2([]byte(plain), salt, defaultIter, keyLen)

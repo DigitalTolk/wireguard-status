@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # Go modules. Group everything into a single PR per run so related updates
+  # (e.g. the golang.org/x/* and mdlayher/* netlink stack) land together
+  # instead of as a flurry of one-per-module PRs.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns:
+          - '*'
+
+  # GitHub Actions used by the workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  # The Docker base images in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docker:
+        patterns:
+          - '*'

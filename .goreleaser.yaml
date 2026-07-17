@@ -25,9 +25,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .CommitDate }}
+      - -X github.com/DigitalTolk/wireguard-status/internal/app.version={{ .Version }}
+      - -X github.com/DigitalTolk/wireguard-status/internal/app.commit={{ .Commit }}
+      - -X github.com/DigitalTolk/wireguard-status/internal/app.date={{ .CommitDate }}
 
 archives:
   - id: wg-status

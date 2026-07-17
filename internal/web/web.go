@@ -20,6 +20,11 @@ import (
 //go:embed templates/*.html
 var templatesFS embed.FS
 
+// templates is parsed once at startup. The templates are embedded and known
+// good, so a parse failure is a build-time programmer error, not a runtime
+// condition — hence template.Must rather than a returned error.
+var templates = template.Must(template.New("").Funcs(tmplFuncs).ParseFS(templatesFS, "templates/*.html"))
+
 // Server wires HTTP handlers to the monitor.
 type Server struct {
 	cfg *config.Config
@@ -27,12 +32,8 @@ type Server struct {
 	tpl *template.Template
 }
 
-func NewServer(cfg *config.Config, mon *status.Monitor) (*Server, error) {
-	tpl, err := template.New("").Funcs(tmplFuncs).ParseFS(templatesFS, "templates/*.html")
-	if err != nil {
-		return nil, err
-	}
-	return &Server{cfg: cfg, mon: mon, tpl: tpl}, nil
+func NewServer(cfg *config.Config, mon *status.Monitor) *Server {
+	return &Server{cfg: cfg, mon: mon, tpl: templates}
 }
 
 // Handler returns the fully-wired, auth-protected HTTP handler.

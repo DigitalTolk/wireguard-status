@@ -9,17 +9,28 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+// wgClient is the subset of *wgctrl.Client that WgCollector uses. Abstracting
+// it behind an interface lets tests inject a fake in place of a live netlink
+// connection.
+type wgClient interface {
+	Devices() ([]*wgtypes.Device, error)
+	Close() error
+}
+
+// newWGClient is a seam over wgctrl.New so tests can substitute a fake client.
+var newWGClient = func() (wgClient, error) { return wgctrl.New() }
+
 // WgCollector reads live WireGuard state via the kernel netlink API using the
 // official wgctrl library, so it needs neither the `wg` binary nor any text
 // parsing.
 type WgCollector struct{}
 
 func (c WgCollector) Collect() ([]Interface, error) {
-	client, err := wgctrl.New()
+	client, err := newWGClient()
 	if err != nil {
 		return nil, fmt.Errorf("wgctrl: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	devices, err := client.Devices()
 	if err != nil {

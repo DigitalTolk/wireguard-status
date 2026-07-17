@@ -3,3 +3,4 @@
 /wg-status.conf
 /config.conf
 *.log
+/coverage.out
