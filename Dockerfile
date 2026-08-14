@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26.5-alpine AS build
+FROM golang:1.27rc2-alpine AS build
 WORKDIR /src
 # Download modules first so they cache independently of source changes.
 COPY go.mod go.sum ./
